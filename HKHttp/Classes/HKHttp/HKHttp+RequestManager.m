@@ -5,10 +5,7 @@
 //  Created by inory on 2019/7/30.
 //
 
-#import "HKHttpManager+RequestManager.h"
-
-
-
+#import "HKHttp+RequestManager.h"
 
 @interface NSURLRequest (decide)
 

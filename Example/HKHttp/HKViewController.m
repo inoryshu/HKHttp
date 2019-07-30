@@ -7,6 +7,7 @@
 //
 
 #import "HKViewController.h"
+#import "HKHttp.h"
 
 @interface HKViewController ()
 
@@ -18,6 +19,8 @@
 {
     [super viewDidLoad];
 	// Do any additional setup after loading the view, typically from a nib.
+    [HKHttp GET]
+    .hkBaseUrl(<#NSString *value#>)
 }
 
 - (void)didReceiveMemoryWarning

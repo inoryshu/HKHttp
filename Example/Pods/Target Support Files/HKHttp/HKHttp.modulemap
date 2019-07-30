@@ -1,0 +1,6 @@
+framework module HKHttp {
+  umbrella header "HKHttp-umbrella.h"
+
+  export *
+  module * { export * }
+}

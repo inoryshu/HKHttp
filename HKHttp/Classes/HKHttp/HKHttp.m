@@ -9,6 +9,7 @@
 #import "AFNetworking.h"
 #import "HKHttp+RequestManager.h"
 #import "AFNetworkActivityIndicatorManager.h"
+#import <ifaddrs.h>
 
 static NSString         *defaultDomain;
 
@@ -23,6 +24,8 @@ static NSTimeInterval   requestTimeout = 40.f;
 #define HK_ERROR_IMFORMATION @"网络出现错误，请检查网络连接"
 
 #define HK_ERROR [NSError errorWithDomain:@"com.HKNetworking.ErrorDomain" code:-999 userInfo:@{ NSLocalizedDescriptionKey:HK_ERROR_IMFORMATION}]
+
+#define HKString(...) [NSString stringWithFormat:__VA_ARGS__]
 
 
 
@@ -46,7 +49,7 @@ static NSTimeInterval   requestTimeout = 40.f;
     defaultDomain = domain;
 }
 
-+ (void)cancleAllRequest {
++ (void)hk_cancleAllRequest {
     @synchronized (self) {
         [[self allTasks] enumerateObjectsUsingBlock:^(HKURLSessionTask  *_Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
             if ([obj isKindOfClass:[HKURLSessionTask class]]) {
@@ -57,19 +60,25 @@ static NSTimeInterval   requestTimeout = 40.f;
     }
 }
 
-+ (void)cancelRequestWithURL:(NSString *)url {
++ (void)hk_cancelRequestWithURL:(NSString *)url {
     if (!url) return;
     @synchronized (self) {
         [[self allTasks] enumerateObjectsUsingBlock:^(HKURLSessionTask * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
             if ([obj isKindOfClass:[HKURLSessionTask class]]) {
                 if ([obj.currentRequest.URL.absoluteString hasSuffix:url]) {
                     [obj cancel];
+                    [[self allTasks] removeObject:obj];
                     *stop = YES;
                 }
             }
         }];
     }
 }
+
++ (void)hk_configHttpHeader:(NSDictionary *)httpHeader{
+    headers = httpHeader;
+}
+
 
 + (NSMutableArray *)allTasks {
     static dispatch_once_t onceToken;
@@ -88,16 +97,19 @@ static NSTimeInterval   requestTimeout = 40.f;
 @interface HKHttpConfigModel()
 
 @property (nonatomic , assign) BOOL  isRefresh;
+@property (nonatomic , assign) BOOL  isCancell;
 @property (nonatomic , assign) BOOL  isCache;
 @property (nonatomic , strong) NSDictionary   * params ;
 @property (nonatomic , strong) NSDictionary   * header ;
 @property (nonatomic , assign) NSTimeInterval   timeout;
-@property (nonatomic , copy )  NSString       * baseUrl;
+@property (nonatomic , copy )  NSString       * httpPath;
+@property (nonatomic , copy )  NSString       * httpUrl;
 @property (nonatomic , copy )  NSString       * domain;
 @property (nonatomic , copy ) void (^ResponseSuccessBlock)(id response);
 @property (nonatomic , copy ) void (^ResponseFailBlock)(NSString *errorString);
 @property (nonatomic , copy ) void (^ResponseErrorBlock)(NSError *error);
 @property (nonatomic , copy ) void (^LoadingProgressBlock)(int64_t bytesRead,int64_t totalBytes);
+@property (nonatomic , copy ) void (^ProgressBlock)(float progress);
 @property (nonatomic , copy ) void (^HttpStartRequst)(void);
 
 @end
@@ -111,7 +123,6 @@ static NSTimeInterval   requestTimeout = 40.f;
         self.HttpStartRequst = ^{
             __strong typeof(weakSelf) self = weakSelf;
             if (!self) return;
-            
             [self startRequest];
         };
     }
@@ -124,7 +135,12 @@ static NSTimeInterval   requestTimeout = 40.f;
         return self;
     };
 }
-
+- (HKConfigToBool)hkCancel{
+    return ^(BOOL is){
+        self.isCancell = is;
+        return self;
+    };
+}
 - (HKConfigToBool)hkCache{
     return ^(BOOL is){
         self.isCache = is;
@@ -153,9 +169,23 @@ static NSTimeInterval   requestTimeout = 40.f;
     };
 }
 
-- (HKConfigToString)hkBaseUrl{
+- (HKConfigToString)hkHttpUrl{
     return ^(NSString *string){
-        self.baseUrl = string;
+        self.httpUrl = string;
+        return self;
+    };
+}
+
+- (HKConfigToString)hkHttpPath{
+    return ^(NSString *string){
+        self.httpPath = string;
+        return self;
+    };
+}
+
+- (HKConfigToString)hkDomain{
+    return ^(NSString *string){
+        self.domain = string;
         return self;
     };
 }
@@ -203,6 +233,17 @@ static NSTimeInterval   requestTimeout = 40.f;
     };
 }
 
+-(HKConfigToFloatBlock)hkFloatProgressBlock{
+    __weak typeof(self) weakSelf = self;
+    
+    return ^(void(^block)(float progress)){
+        
+        if (weakSelf) if (block) weakSelf.ProgressBlock = block;
+        
+        return weakSelf;
+    };
+}
+
 - (HKConfigToEmpty)hkStartRequest{
     
     __weak typeof(self) weakSelf = self;
@@ -225,17 +266,21 @@ static NSTimeInterval   requestTimeout = 40.f;
         manager = [AFHTTPSessionManager manager];
         
         //默认解析模式
-        manager.requestSerializer = [AFHTTPRequestSerializer serializer];
+        manager.requestSerializer = [AFJSONRequestSerializer serializer];
         
         manager.requestSerializer.stringEncoding = NSUTF8StringEncoding;
         
+        [manager.requestSerializer willChangeValueForKey:@"timeoutInterval"];
         manager.requestSerializer.timeoutInterval = requestTimeout;
+        [manager.requestSerializer didChangeValueForKey:@"timeoutInterval"];
         
-        [manager.requestSerializer setValue:@"gzip" forHTTPHeaderField:@"Content-Encoding"];
-        [manager.requestSerializer setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-        [manager.requestSerializer setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-        manager.responseSerializer = [AFHTTPResponseSerializer serializer];
+        AFJSONResponseSerializer *response = [AFJSONResponseSerializer serializer];
+        response.removesKeysWithNullValues = YES;
+        manager.responseSerializer = response;
         
+        manager.securityPolicy = [AFSecurityPolicy policyWithPinningMode:AFSSLPinningModeNone];
+        manager.securityPolicy.allowInvalidCertificates = YES;
+        [manager.securityPolicy setValidatesDomainName:NO];
         
         //配置响应序列化
         manager.responseSerializer.acceptableContentTypes = [NSSet setWithArray:@[@"application/json",
@@ -248,9 +293,6 @@ static NSTimeInterval   requestTimeout = 40.f;
                                                                                   @"application/octet-stream",
                                                                                   @"application/zip"]];
     });
-    
-    //每次网络请求的时候，检查此时磁盘中的缓存大小，阈值默认是40MB，如果超过阈值，则清理LRU缓存,同时也会清理过期缓存，缓存默认SSL是7天，磁盘缓存的大小和SSL的设置可以通过该方法[RYCacheManager shareManager] setCacheTime: diskCapacity:]设置
-    //    [[RYCacheManager shareManager] clearLRUCache];
     return manager;
 }
 
@@ -263,30 +305,30 @@ static NSTimeInterval   requestTimeout = 40.f;
     [manager setReachabilityStatusChangeBlock:^(AFNetworkReachabilityStatus status) {
         
         switch (status) {
-                case AFNetworkReachabilityStatusNotReachable:
+            case AFNetworkReachabilityStatusNotReachable:
                 networkStatus = HKNetworkStatusNotReachable;
                 break;
-                case AFNetworkReachabilityStatusUnknown:
+            case AFNetworkReachabilityStatusUnknown:
                 networkStatus = HKNetworkStatusUnknown;
                 break;
-                case AFNetworkReachabilityStatusReachableViaWWAN:
+            case AFNetworkReachabilityStatusReachableViaWWAN:
                 networkStatus = HKNetworkStatusReachableViaWWAN;
                 break;
-                case AFNetworkReachabilityStatusReachableViaWiFi:
+            case AFNetworkReachabilityStatusReachableViaWiFi:
                 networkStatus = HKNetworkStatusReachableViaWiFi;
                 break;
             default:
                 networkStatus = HKNetworkStatusUnknown;
                 break;
         }
-        
     }];
 }
+
+
 
 -(void)startRequest{
     
     [HKHttpConfigModel checkNetworkStatus];
-    
     if (networkStatus == HKNetworkStatusNotReachable) {
         if (self.ResponseFailBlock){
             self.ResponseFailBlock(HK_ERROR_IMFORMATION);
@@ -298,21 +340,56 @@ static NSTimeInterval   requestTimeout = 40.f;
     }
 }
 
+-(NSString *)hk_getListUrl{
+    if (![HKHttpConfigModel isNull:self.httpUrl]){
+        return self.httpUrl;
+    }
+    return self.httpPath;
+}
+
+-(NSString *)getReuestUrl{
+    if (![HKHttpConfigModel isNull:self.httpUrl]){
+        return self.httpUrl;
+    }
+    if (![HKHttpConfigModel isNull:self.domain]){
+        return HKString(@"%@%@",self.domain,self.httpPath);
+    }
+    if (![HKHttpConfigModel isNull:defaultDomain]){
+        return HKString(@"%@%@",defaultDomain,self.httpPath);
+    }
+    return self.httpPath;
+}
+
++ (BOOL)isNull:(NSObject *)object {
+    if (object == nil ||
+        [object isEqual:[NSNull null]] ||
+        [object isEqual:@""] ||
+        [object isEqual:@" "] ||
+        [object isEqual:@"null"] ||
+        [object isEqual:@"<null>"] ){
+        
+        return YES;
+    } else {
+        return NO;
+    }
+}
 
 @end
 
 @implementation HKGetConfigModel
 
 -(void)startRequest{
+    
     AFHTTPSessionManager *manager = [HKHttpConfigModel sharedInstance];
     
     __block HKURLSessionTask *session = nil;
-    
-    session=[manager GET:self.baseUrl parameters:self.params progress:^(NSProgress * _Nonnull downloadProgress) {
+    session = [manager GET:[self getReuestUrl] parameters:self.params headers:self.header progress:^(NSProgress * _Nonnull downloadProgress) {
+        
         if (self.LoadingProgressBlock)
-        self.LoadingProgressBlock(downloadProgress.completedUnitCount,  downloadProgress.totalUnitCount);
+            self.LoadingProgressBlock(downloadProgress.completedUnitCount,  downloadProgress.totalUnitCount);
     } success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
-        if (self.ResponseSuccessBlock)self.ResponseSuccessBlock(responseObject);
+                  if (self.ResponseSuccessBlock)self.ResponseSuccessBlock(responseObject);
+
         [[HKHttp allTasks] removeObject:session];
     } failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
         if ([error code] == NSURLErrorCancelled){
@@ -322,6 +399,16 @@ static NSTimeInterval   requestTimeout = 40.f;
         if (self.ResponseFailBlock)self.ResponseFailBlock(error.localizedDescription);
         [[HKHttp allTasks] removeObject:session];
     }];
+
+    // MARK: 取消url相同的旧的请求
+    if(self.isCancell){
+        HKURLSessionTask *oldTask = [HKHttp hkCancleSameUrlRequestInTasksPool:session];
+        if (oldTask) [[HKHttp allTasks] removeObject:oldTask];
+        if (session) [[HKHttp allTasks] addObject:session];
+        [session resume];
+        return ;
+    }
+    
     if ([HKHttp hkHaveSameRequestInTasksPool:session] && !self.isRefresh) {
         [session cancel];
         return;
@@ -340,19 +427,19 @@ static NSTimeInterval   requestTimeout = 40.f;
 @implementation HKPostConfigModel
 
 -(void)startRequest{
-    
+   
     AFHTTPSessionManager *manager = [HKHttpConfigModel sharedInstance];
     
     __block HKURLSessionTask *session = nil;
     
-    session = [manager POST:self.baseUrl parameters:self.params progress:^(NSProgress * _Nonnull uploadProgress) {
+    session = [manager POST:[self getReuestUrl] parameters:self.params headers:self.header progress:^(NSProgress * _Nonnull uploadProgress) {
+        
         if (self.LoadingProgressBlock)
-        self.LoadingProgressBlock(uploadProgress.completedUnitCount,  uploadProgress.totalUnitCount);
+            self.LoadingProgressBlock(uploadProgress.completedUnitCount,  uploadProgress.totalUnitCount);
     } success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
-        
-        if (self.ResponseSuccessBlock)self.ResponseSuccessBlock(responseObject);
         [[HKHttp allTasks] removeObject:session];
-        
+                    if (self.ResponseSuccessBlock)self.ResponseSuccessBlock(responseObject);
+
     } failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
         
         if ([error code] == NSURLErrorCancelled){
@@ -361,20 +448,32 @@ static NSTimeInterval   requestTimeout = 40.f;
         if (self.ResponseErrorBlock)self.ResponseErrorBlock(error);
         if (self.ResponseFailBlock)self.ResponseFailBlock(error.localizedDescription);
         [[HKHttp allTasks] removeObject:session];
-        
+ 
     }];
     
+    
+    // MARK: 取消url相同的旧的请求
+    if(self.isCancell){
+        HKURLSessionTask *oldTask = [HKHttp hkCancleSameUrlRequestInTasksPool:session];
+        if (oldTask) [[HKHttp allTasks] removeObject:oldTask];
+        if (session) [[HKHttp allTasks] addObject:session];
+        [session resume];
+        return ;
+    }
     if ([HKHttp hkHaveSameRequestInTasksPool:session] && !self.isRefresh) {
         [session cancel];
-        return;
-    }else {
+        [[HKHttp allTasks] removeObject:session];
+    }else if (self.isRefresh){
         HKURLSessionTask *oldTask = [HKHttp hkCancleSameRequestInTasksPool:session];
         if (oldTask) [[HKHttp allTasks] removeObject:oldTask];
         if (session) [[HKHttp allTasks] addObject:session];
         [session resume];
         return ;
     }
+    
 }
+
+
 @end
 
 @interface HKUploadConfigModel ()
@@ -394,33 +493,31 @@ static NSTimeInterval   requestTimeout = 40.f;
     
     AFHTTPSessionManager *manager = [HKHttpConfigModel sharedInstance];
     __block HKURLSessionTask *session = nil;
-    
-    session = [manager POST:self.baseUrl
-                 parameters:nil
-  constructingBodyWithBlock:^(id<AFMultipartFormData>  _Nonnull formData) {
-      NSString *fileName = nil;
-      
-      NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-      formatter.dateFormat = @"yyyyMMddHHmmss";
-      
-      NSString *day = [formatter stringFromDate:[NSDate date]];
-      
-      fileName = [NSString stringWithFormat:@"%@.%@",day,self.fileType];
-      
-      [formData appendPartWithFileData:self.data name:self.fileName fileName:fileName mimeType:self.mimeType];
-      
-  } progress:^(NSProgress * _Nonnull uploadProgress) {
-      if (self.LoadingProgressBlock) self.LoadingProgressBlock (uploadProgress.completedUnitCount,uploadProgress.totalUnitCount);
-      
-  } success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
-      if (self.ResponseSuccessBlock) self.ResponseSuccessBlock(responseObject);
-      [[HKHttp allTasks] removeObject:session];
-      
-  } failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
-      if (self.ResponseErrorBlock)self.ResponseErrorBlock(error);
-      if (self.ResponseFailBlock)self.ResponseFailBlock(error.localizedDescription);
-      [[HKHttp allTasks] removeObject:session];
-  }];
+    session = [manager POST:self.httpPath parameters:nil headers:nil constructingBodyWithBlock:^(id<AFMultipartFormData>  _Nonnull formData) {
+        
+        NSString *fileName = nil;
+        
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.dateFormat = @"yyyyMMddHHmmss";
+        
+        NSString *day = [formatter stringFromDate:[NSDate date]];
+        
+        fileName = [NSString stringWithFormat:@"%@.%@",day,self.fileType];
+        
+        [formData appendPartWithFileData:self.data name:self.fileName fileName:fileName mimeType:self.mimeType];
+        
+    } progress:^(NSProgress * _Nonnull uploadProgress) {
+        if (self.LoadingProgressBlock) self.LoadingProgressBlock (uploadProgress.completedUnitCount,uploadProgress.totalUnitCount);
+        
+    } success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
+        if (self.ResponseSuccessBlock) self.ResponseSuccessBlock(responseObject);
+        [[HKHttp allTasks] removeObject:session];
+        
+    } failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+        if (self.ResponseErrorBlock)self.ResponseErrorBlock(error);
+        if (self.ResponseFailBlock)self.ResponseFailBlock(error.localizedDescription);
+        [[HKHttp allTasks] removeObject:session];
+    }];
     
     [session resume];
     
@@ -462,11 +559,37 @@ static NSTimeInterval   requestTimeout = 40.f;
 @interface HKDownloadConfigModel ()
 
 @property (nonatomic , copy ) void (^DownloadSuccessBlock)(NSString *filePath,BOOL isUnzip);
+@property (nonatomic , copy ) NSString *fileName;
 
 @end
 
 @implementation HKDownloadConfigModel
+
+- (HKConfigToString)hkCacheFileName{
+    return ^(NSString *string){
+        self.fileName = string;
+        return self;
+    };
+}
+
 -(void)startRequest{
     
+    [HKHttpConfigModel sharedInstance].requestSerializer = [AFHTTPRequestSerializer serializer];
+    [HKHttpConfigModel sharedInstance].responseSerializer = [AFHTTPResponseSerializer serializer];
+    
+    __block HKURLSessionTask *session = nil;
+    session = [[HKHttpConfigModel sharedInstance] GET:self.httpUrl parameters:nil headers:self.header progress:^(NSProgress * _Nonnull downloadProgress) {
+        if (self.ProgressBlock)self.ProgressBlock(downloadProgress.fractionCompleted);
+    } success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
+        if (self.ResponseSuccessBlock)self.ResponseSuccessBlock(responseObject);
+    } failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+        
+        if (self.ResponseFailBlock)self.ResponseFailBlock(error.localizedDescription);
+        if (self.ResponseErrorBlock)self.ResponseErrorBlock(error);
+    }];
+    
+    [session resume];
 }
+
+
 @end

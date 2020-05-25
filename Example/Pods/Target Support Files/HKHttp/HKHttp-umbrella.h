@@ -10,6 +10,10 @@
 #endif
 #endif
 
+#import "HKCacheManager.h"
+#import "HKDiskCache.h"
+#import "HKLRUManager.h"
+#import "HKMemoryCache.h"
 #import "HKHttp+RequestManager.h"
 #import "HKHttp.h"
 #import "HKNetworkingHelper.h"

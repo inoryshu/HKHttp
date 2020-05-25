@@ -8,7 +8,7 @@
 
 Pod::Spec.new do |s|
   s.name             = 'HKHttp'
-  s.version          = '0.1.0'
+  s.version          = '1.0.0'
   s.summary          = '使用链式语法实现对AFNetworking的二次封装.'
 
 # This description is used to generate tags and improve search results.
